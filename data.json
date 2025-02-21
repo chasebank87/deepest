@@ -1,0 +1,19 @@
+{
+  "openaiApiKey": "",
+  "openrouterApiKey": "",
+  "perplexityApiKey": "",
+  "tavilyApiKey": "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",
+  "lmstudioUrl": "http://localhost:1234",
+  "ollamaUrl": "http://localhost:11434",
+  "maxTokens": 25200,
+  "temperature": 0.75,
+  "openaiRateLimit": 3,
+  "openrouterRateLimit": 5,
+  "perplexityRateLimit": 3,
+  "tavilyRateLimit": 5,
+  "selectedLLMProvider": "lmstudio",
+  "selectedWebSearchProvider": "tavily",
+  "outputFolder": "Deepest Reports",
+  "selectedModel": "deepseek-r1-distill-llama-70b",
+  "debugMode": true
+}
