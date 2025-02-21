@@ -1,15 +1,16 @@
 import { App, Plugin, PluginSettingTab, Setting, Notice } from 'obsidian';
 import { DeepestSettings, DEFAULT_SETTINGS } from './settings';
 import { ProviderFactory } from './providers/ProviderFactory';
+import DeepestPlugin from './main';
 
 export class DeepestSettingTab extends PluginSettingTab {
-    private plugin: Plugin;
+    private plugin: DeepestPlugin;
     private settings: DeepestSettings;
 
-    constructor(app: App, plugin: Plugin) {
+    constructor(app: App, plugin: DeepestPlugin) {
         super(app, plugin);
         this.plugin = plugin;
-        this.settings = (plugin as any).settings;
+        this.settings = plugin.settings;
     }
 
     async display(): Promise<void> {
@@ -26,41 +27,58 @@ export class DeepestSettingTab extends PluginSettingTab {
             .setDesc('Select your preferred LLM provider')
             .addDropdown(dropdown => dropdown
                 .addOptions({
-                    'openai': 'OpenAI',
-                    'openrouter': 'OpenRouter',
                     'lmstudio': 'LM Studio',
-                    'ollama': 'Ollama'
+                    'openrouter': 'OpenRouter'
                 })
                 .setValue(this.settings.selectedLLMProvider)
                 .onChange(async (value) => {
-                    this.settings.selectedLLMProvider = value;
-                    await (this.plugin as any).saveSettings();
+                    this.settings.selectedLLMProvider = value as 'lmstudio' | 'openrouter';
+                    await this.plugin.saveSettings();
                     this.display();
                 }));
 
         // LLM Provider Specific Settings
-        if (this.settings.selectedLLMProvider === 'openai') {
-            new Setting(llmSettingsContainer)
-                .setName('OpenAI API key')
-                .setDesc('Enter your OpenAI API key')
-                .addText(text => text
-                    .setValue(this.settings.openaiApiKey)
-                    .onChange(async (value) => {
-                        this.settings.openaiApiKey = value;
-                        await (this.plugin as any).saveSettings();
-                    }));
-        }
-
         if (this.settings.selectedLLMProvider === 'openrouter') {
             new Setting(llmSettingsContainer)
-                .setName('OpenRouter API key')
+                .setName('OpenRouter API Key')
                 .setDesc('Enter your OpenRouter API key')
                 .addText(text => text
                     .setValue(this.settings.openrouterApiKey)
                     .onChange(async (value) => {
                         this.settings.openrouterApiKey = value;
-                        await (this.plugin as any).saveSettings();
+                        await this.plugin.saveSettings();
+                        // Refresh model list when API key changes
+                        this.refreshOpenRouterModels();
                     }));
+
+            // Model Selection
+            const modelSetting = new Setting(llmSettingsContainer)
+                .setName('Model')
+                .setDesc('Select the OpenRouter model to use')
+                .addDropdown(dropdown => {
+                    dropdown.addOption('loading', 'Loading models...');
+                    
+                    // Load models after dropdown is created
+                    const provider = ProviderFactory.createLLMProvider(this.settings);
+                    if (provider) {
+                        provider.getModels().then(models => {
+                            dropdown.selectEl.empty();
+                            models.forEach(model => dropdown.addOption(model, model));
+                            dropdown.setValue(this.settings.selectedModel);
+                        }).catch(error => {
+                            dropdown.selectEl.empty();
+                            dropdown.addOption('error', 'Error loading models');
+                            console.error('Failed to load OpenRouter models:', error);
+                        });
+                    }
+
+                    dropdown.onChange(async value => {
+                        this.settings.selectedModel = value;
+                        await this.plugin.saveSettings();
+                    });
+
+                    return dropdown;
+                });
         }
 
         if (this.settings.selectedLLMProvider === 'lmstudio') {
@@ -95,18 +113,6 @@ export class DeepestSettingTab extends PluginSettingTab {
                         .setDesc('Could not fetch models. Please check your LM Studio connection.');
                 }
             }
-        }
-
-        if (this.settings.selectedLLMProvider === 'ollama') {
-            new Setting(llmSettingsContainer)
-                .setName('Ollama URL')
-                .setDesc('Enter your Ollama server URL')
-                .addText(text => text
-                    .setValue(this.settings.ollamaUrl)
-                    .onChange(async (value) => {
-                        this.settings.ollamaUrl = value;
-                        await (this.plugin as any).saveSettings();
-                    }));
         }
 
         // Helper function to create test button with status
@@ -338,5 +344,33 @@ export class DeepestSettingTab extends PluginSettingTab {
                     this.plugin.settings.debugMode = value;
                     await this.plugin.saveSettings();
                 }));
+    }
+
+    private async refreshOpenRouterModels() {
+        const modelDropdown = this.containerEl.querySelector('.model-dropdown') as HTMLElement;
+        if (modelDropdown) {
+            const dropdown = modelDropdown.querySelector('select');
+            if (dropdown) {
+                dropdown.innerHTML = '<option value="loading">Loading models...</option>';
+                
+                try {
+                    const provider = ProviderFactory.createLLMProvider(this.settings);
+                    if (provider) {
+                        const models = await provider.getModels();
+                        dropdown.innerHTML = '';
+                        models.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.text = model;
+                            dropdown.appendChild(option);
+                        });
+                        dropdown.value = this.settings.selectedModel;
+                    }
+                } catch (error) {
+                    dropdown.innerHTML = '<option value="error">Error loading models</option>';
+                    console.error('Failed to refresh OpenRouter models:', error);
+                }
+            }
+        }
     }
 } 

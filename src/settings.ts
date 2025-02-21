@@ -20,7 +20,7 @@ export interface DeepestSettings {
     tavilyRateLimit: number;
 
     // Provider selection
-    selectedLLMProvider: string;
+    selectedLLMProvider: 'lmstudio' | 'openrouter';
     selectedWebSearchProvider: string;
 
     // Output settings
@@ -50,7 +50,7 @@ export const DEFAULT_SETTINGS: DeepestSettings = {
     openrouterRateLimit: 5,
     perplexityRateLimit: 3,
     tavilyRateLimit: 5,
-    selectedLLMProvider: 'openai',
+    selectedLLMProvider: 'openrouter',
     selectedWebSearchProvider: 'perplexity',
     outputFolder: 'Deepest Reports',
     selectedModel: '',

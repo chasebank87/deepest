@@ -38,16 +38,16 @@ export default class DeepestPlugin extends Plugin {
 
     async activateView() {
         const { workspace } = this.app;
-        
-        let leaf = workspace.getLeavesOfType(RESEARCH_VIEW_TYPE)[0];
+        let leaf = workspace.getRightLeaf(false);
         
         if (!leaf) {
-            leaf = workspace.getRightLeaf(false);
-            await leaf.setViewState({
-                type: RESEARCH_VIEW_TYPE,
-                active: true,
-            });
+            return; // Exit if we can't create a leaf
         }
+        
+        await leaf.setViewState({
+            type: RESEARCH_VIEW_TYPE,
+            active: true,
+        });
         
         workspace.revealLeaf(leaf);
     }

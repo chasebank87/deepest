@@ -1,8 +1,11 @@
 export interface LLMProvider {
     name: string;
-    getModels(): Promise<string[]>;
-    chatCompletion(prompt: string): Promise<string>;
+    chatCompletion(prompt: string, systemPrompt: string, options?: {
+        maxTokens?: number;
+        temperature?: number;
+    }): Promise<string>;
     testConnection(): Promise<boolean>;
+    getModels(): Promise<string[]>;
 }
 
 export interface CompletionOptions {

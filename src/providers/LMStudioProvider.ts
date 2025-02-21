@@ -29,7 +29,10 @@ export class LMStudioProvider implements LLMProvider {
         }
     }
 
-    async chatCompletion(prompt: string): Promise<string> {
+    async chatCompletion(prompt: string, systemPrompt: string, options?: {
+        maxTokens?: number;
+        temperature?: number;
+    }): Promise<string> {
         try {
             const response = await requestUrl({
                 url: `${this.baseUrl}/v1/chat/completions`,
@@ -65,8 +68,8 @@ export class LMStudioProvider implements LLMProvider {
                             }
                         }
                     },
-                    temperature: this.settings.temperature,
-                    max_tokens: this.settings.maxTokens,
+                    temperature: options?.temperature || this.settings.temperature,
+                    max_tokens: options?.maxTokens || this.settings.maxTokens,
                     stream: false
                 })
             });

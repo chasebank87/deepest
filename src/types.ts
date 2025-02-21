@@ -8,6 +8,8 @@ export interface ResearchData {
     title: string;
     introduction: string;
     sections: string[];
+    sectionContent: { section: string; content: string }[];
+    conclusion: string;
     depth: number;
 }
 
