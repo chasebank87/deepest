@@ -1,15 +1,23 @@
 import { WebSearchProvider, SearchResult } from './WebSearchProvider';
 import { requestUrl } from 'obsidian';
+import { RateLimiter } from '../utils/RateLimiter';
+import { DeepestSettings } from '../settings';
 
 export class TavilyProvider implements WebSearchProvider {
     name = 'Tavily';
     private apiKey: string;
+    private rateLimiter: RateLimiter;
 
-    constructor(apiKey: string) {
+    constructor(apiKey: string, private settings: DeepestSettings) {
         this.apiKey = apiKey;
+        // Always enable rate limiting for cloud providers
+        this.rateLimiter = new RateLimiter(settings.webSearchRateLimit);
     }
 
     async search(query: string, maxResults: number): Promise<SearchResult[]> {
+        // Always rate limit cloud providers
+        await this.rateLimiter.waitForNext();
+        
         try {
             const response = await requestUrl({
                 url: 'https://api.tavily.com/search',

@@ -252,6 +252,28 @@ export class DeepestSettingTab extends PluginSettingTab {
                     });
             });
 
+        new Setting(llmSettingsContainer)
+            .setName('Enable LLM Rate Limiting')
+            .setDesc('Enable rate limiting for LLM API requests')
+            .addToggle(toggle => toggle
+                .setValue(this.settings.llmRateLimitEnabled)
+                .onChange(async value => {
+                    this.settings.llmRateLimitEnabled = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(llmSettingsContainer)
+            .setName('LLM Rate Limit')
+            .setDesc('Maximum LLM API requests per minute (0 for no limit)')
+            .addSlider(slider => slider
+                .setLimits(0, 500, 5)
+                .setValue(this.settings.llmRateLimit)
+                .setDynamicTooltip()
+                .onChange(async value => {
+                    this.settings.llmRateLimit = value;
+                    await this.plugin.saveSettings();
+                }));
+
         // Web Search Section
         containerEl.createEl('h2', { text: 'Web search settings' });
 
@@ -321,6 +343,28 @@ export class DeepestSettingTab extends PluginSettingTab {
                 new Notice(`❌ Connection error: ${(error as Error).message}`);
             }
         });
+
+        new Setting(webSearchSettingsContainer)
+            .setName('Enable Search Rate Limiting')
+            .setDesc('Enable rate limiting for web search requests')
+            .addToggle(toggle => toggle
+                .setValue(this.settings.webSearchRateLimitEnabled)
+                .onChange(async value => {
+                    this.settings.webSearchRateLimitEnabled = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(webSearchSettingsContainer)
+            .setName('Web Search Rate Limit')
+            .setDesc('Maximum web search requests per minute (0 for no limit)')
+            .addSlider(slider => slider
+                .setLimits(0, 500, 5)
+                .setValue(this.settings.webSearchRateLimit)
+                .setDynamicTooltip()
+                .onChange(async value => {
+                    this.settings.webSearchRateLimit = value;
+                    await this.plugin.saveSettings();
+                }));
 
         // Output Settings Section
         containerEl.createEl('h2', { text: 'Output settings' });

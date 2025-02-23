@@ -21,8 +21,10 @@ export class ProviderFactory {
     static createWebSearchProvider(settings: DeepestSettings): WebSearchProvider | null {
         switch (settings.selectedWebSearchProvider) {
             case 'tavily':
-                return new TavilyProvider(settings.tavilyApiKey);
-            // Add Perplexity provider here
+                return new TavilyProvider(settings.tavilyApiKey, settings);
+            case 'perplexity':
+                // Add Perplexity provider here
+                return null;
             default:
                 return null;
         }

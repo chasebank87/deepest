@@ -1,4 +1,4 @@
-import { Notice, App } from 'obsidian';
+import { Notice, App, normalizePath } from 'obsidian';
 import { CHAT_PROMPTS } from '../prompts';
 import { ProviderFactory } from '../providers/ProviderFactory';
 import { DeepestSettings } from '../settings';
@@ -12,6 +12,7 @@ export class ResearchManager {
     private view: ResearchView;
     private sectionLearnings: SectionLearnings[] = [];
     private sectionContent: { section: string; content: string }[] = [];
+    private currentTopic: string = '';
 
     constructor(
         private settings: DeepestSettings, 
@@ -33,13 +34,14 @@ export class ResearchManager {
             throw new Error('No LLM provider configured');
         }
 
-        // List of prompts that should use MARK_MAIN
+        // Only these prompts should use MARK_MAIN (they return markdown)
         const markdownPrompts = [
-            RESEARCH_PROMPTS.SYNTHESIZE,
-            RESEARCH_PROMPTS.CONCLUSION
+            RESEARCH_PROMPTS.SYNTHESIZE.toString(),
+            RESEARCH_PROMPTS.CONCLUSION.toString()
         ];
 
-        const systemPrompt = markdownPrompts.some(p => prompt.startsWith(p.toString())) 
+        // All other prompts should use MAIN (they return JSON)
+        const systemPrompt = markdownPrompts.some(p => prompt.startsWith(p)) 
             ? SYSTEM_PROMPTS.MARK_MAIN 
             : SYSTEM_PROMPTS.MAIN;
         
@@ -124,6 +126,8 @@ export class ResearchManager {
                 breadth
             });
 
+            this.currentTopic = topic;
+
             // Step 1: Generate sections
             this.view.updateProgress(this.createProgressUpdate('Generating Sections', 0, 1));
             const sections = await this.getSections(topic, answers, breadth);
@@ -139,7 +143,7 @@ export class ResearchManager {
             const introduction = await this.getIntro(topic, sections);
             this.view.updateProgress(this.createProgressUpdate('Generating Introduction', 1, 1));
 
-            // Step 4: Generate SERP queries and get learnings for each section
+            // Step 4: Process sections in parallel
             for (let i = 0; i < sections.length; i++) {
                 this.view.updateProgress(this.createProgressUpdate(
                     'Generating Search Queries',
@@ -151,88 +155,39 @@ export class ResearchManager {
                 const queries = await this.getQueries(topic, sections[i], breadth);
                 this.debug(`Queries for section "${sections[i]}":`, queries);
 
-                // Search and extract learnings for each query
-                for (const query of queries) {
-                    this.view.updateProgress(this.createProgressUpdate(
-                        'Searching Web',
-                        i,
-                        sections.length,
-                        `Researching: ${sections[i]}`
-                    ));
+                // Search all queries in parallel
+                const searchPromises = queries.map(query => this.search(query, breadth));
+                const allResults = await Promise.all(searchPromises);
+                
+                // Flatten results and process them in parallel
+                const flatResults = allResults.flat();
+                const sectionResult = await this.processSearchResults(flatResults, sections[i]);
+                
+                // Store the learnings
+                this.sectionLearnings.push(sectionResult);
 
-                    const results = await this.search(query, breadth);
-                    this.debug(`Search results for query "${query}":`, results);
-
-                    // Extract learnings from search results
-                    this.view.updateProgress(this.createProgressUpdate(
-                        'Extracting Learnings',
-                        i,
-                        sections.length,
-                        `Learning from: ${sections[i]}`
-                    ));
-
-                    await this.getLearnings(sections[i], results);
-                }
-
-                // Inside deepResearch, before gap analysis:
-                this.debug(`Before gap analysis for section "${sections[i]}", learnings:`, this.getLearningsForSection(sections[i]));
-
-                // Analyze gaps and do deeper research based on depth setting
+                // Gap analysis and deeper research
                 for (let d = 0; d < depth; d++) {
-                    const learningsBeforeGap = this.getLearningsForSection(sections[i]);
-                    this.debug(`At depth ${d + 1}, section "${sections[i]}" has ${learningsBeforeGap.length} learnings`);
-
-                    this.view.updateProgress(this.createProgressUpdate(
-                        'Analyzing Gaps',
-                        i * depth + d,
-                        sections.length * depth,
-                        `Finding gaps in: ${sections[i]} (Depth ${d + 1}/${depth})`
-                    ));
-
                     const gaps = await this.getGaps(sections[i]);
-                    this.debug(`Knowledge gaps for section "${sections[i]}" at depth ${d + 1}:`, gaps);
+                    if (gaps.length === 0) break;
 
-                    // If we found gaps, do another round of research
-                    if (gaps.length > 0) {
-                        this.view.updateProgress(this.createProgressUpdate(
-                            'Researching Gaps',
-                            i * depth + d,
-                            sections.length * depth,
-                            `Investigating gaps in: ${sections[i]} (Depth ${d + 1}/${depth})`
-                        ));
-
-                        const gapQueries = await this.getQueries(topic, sections[i], breadth, gaps);
-                        this.debug(`Gap-based queries for section "${sections[i]}" at depth ${d + 1}:`, gapQueries);
-
-                        // Search and learn from gap queries
-                        for (const query of gapQueries) {
-                            const results = await this.search(query, breadth);
-                            await this.getLearnings(sections[i], results);
-                        }
-                    } else {
-                        // No more gaps found, break the depth loop for this section
-                        break;
+                    const gapQueries = await this.getQueries(topic, sections[i], breadth, gaps);
+                    
+                    // Process gap queries in parallel
+                    const gapSearchPromises = gapQueries.map(query => this.search(query, breadth));
+                    const gapResults = await Promise.all(gapSearchPromises);
+                    const gapResult = await this.processSearchResults(gapResults.flat(), sections[i]);
+                    
+                    // Store gap learnings
+                    const existingSection = this.sectionLearnings.find(sl => sl.section === sections[i]);
+                    if (existingSection) {
+                        existingSection.learnings.push(...gapResult.learnings);
                     }
                 }
-
-                // Synthesize section content after all research is complete
-                this.view.updateProgress(this.createProgressUpdate(
-                    'Synthesizing Content',
-                    i,
-                    sections.length,
-                    `Synthesizing: ${sections[i]}`
-                ));
-
-                const content = await this.synthesizeSection(sections[i]);
-                this.sectionContent.push({
-                    section: sections[i],
-                    content
-                });
-
-                // Clear previous section's learnings after we're completely done with it
-                this.sectionLearnings = this.sectionLearnings.filter(sl => sl.section === sections[i]);
             }
-            this.view.updateProgress(this.createProgressUpdate('Generating Search Queries', sections.length, sections.length));
+
+            // Synthesize all sections in parallel
+            await this.synthesizeSections(topic, sections);
 
             // After all sections are processed, before returning researchData
             // Generate conclusion
@@ -384,39 +339,48 @@ export class ResearchManager {
     }
 
     async getQueries(topic: string, section: string, breadth: number, gaps?: string[]): Promise<string[]> {
-        try {
-            const provider = ProviderFactory.createLLMProvider(this.settings);
-            if (!provider) {
-                throw new Error('No LLM provider configured');
+        const maxRetries = 1;
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const prompt = RESEARCH_PROMPTS.SERP(
+                    topic,
+                    section,
+                    breadth,
+                    gaps
+                );
+
+                const response = await this.getChatCompletion(prompt);
+                this.debug('Search queries response:', response);
+
+                const queries = JSON.parse(response);
+                
+                // Validate response format
+                if (!Array.isArray(queries) || queries.some(q => typeof q !== 'string')) {
+                    if (attempt < maxRetries) {
+                        this.debug('Invalid query format, retrying...');
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    throw new Error('Invalid query format returned from LLM');
+                }
+                
+                this.debug('Parsed queries:', queries);
+                return queries;
+
+            } catch (error) {
+                if (attempt < maxRetries) {
+                    this.debug('Error generating queries, retrying:', error);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+                this.debug('Error generating search queries:', error);
+                throw new Error(`Failed to generate search queries: ${(error as Error).message}`);
             }
-            
-            this.debug('Generating search queries for section:', {
-                topic,
-                section,
-                breadth,
-                gaps
-            });
-
-            const prompt = RESEARCH_PROMPTS.SERP(
-                topic,
-                section,
-                breadth,
-                gaps
-            );
-
-            const response = await this.getChatCompletion(prompt);
-            
-            this.debug('Search queries response:', response);
-
-            const queries = JSON.parse(response);
-            
-            this.debug('Parsed queries:', queries);
-            return queries;
-
-        } catch (error) {
-            this.debug('Error generating search queries:', error);
-            throw new Error(`Failed to generate search queries: ${(error as Error).message}`);
         }
+        
+        // This should never be reached due to the throw above, but TypeScript needs it
+        return [];
     }
 
     async search(query: string, maxResults: number, isRetry: boolean = false): Promise<SearchResult[]> {
@@ -428,21 +392,33 @@ export class ResearchManager {
             
             this.debug('Searching with query:', {
                 query,
-                maxResults,
                 isRetry
             });
 
-            const results = await provider.search(query, isRetry ? maxResults + 1 : maxResults);
+            const resultsToGet = isRetry ? maxResults + 1 : maxResults;
+            const results = await provider.search(query, resultsToGet);
             
-            // Check if all results have empty content
-            const hasContent = results.some(r => r.content);
-            if (!hasContent && !isRetry) {
-                this.debug('All results have empty content, retrying with increased maxResults');
+            // Filter and sort results
+            const validResults = results
+                .filter(r => r.content)
+                .sort((a, b) => {
+                    // First try to sort by score if available
+                    if ('score' in a && 'score' in b) {
+                        return (b.score || 0) - (a.score || 0);
+                    }
+                    // Fallback to content length
+                    return (b.content?.length || 0) - (a.content?.length || 0);
+                })
+                // Take top 2 results
+                .slice(0, 2);
+
+            if (validResults.length === 0 && !isRetry) {
+                this.debug('No valid results found, retrying with increased maxResults');
                 return this.search(query, maxResults, true);
             }
 
-            this.debug('Search results:', results);
-            return results;
+            this.debug('Filtered search results:', validResults);
+            return validResults;
 
         } catch (error) {
             this.debug('Error in web search:', error);
@@ -502,57 +478,221 @@ export class ResearchManager {
         return chunks;
     }
 
-    async getLearnings(section: string, searchResults: SearchResult[]): Promise<string[]> {
+    private async processChunkWithRetry(section: string, url: string, chunk: string, retryCount = 1): Promise<string[]> {
+        for (let attempt = 0; attempt <= retryCount; attempt++) {
+            try {
+                const prompt = RESEARCH_PROMPTS.LEARNING(section, url, chunk);
+                const response = await this.getChatCompletion(prompt);
+                return JSON.parse(response);
+            } catch (error) {
+                if (attempt === retryCount) {
+                    this.debug(`Failed to process chunk after ${retryCount} attempts:`, error);
+                    return []; // Return empty array instead of throwing
+                }
+                // Wait briefly before retry
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        return [];
+    }
+
+    private async processSearchResults(searchResults: SearchResult[], section: string): Promise<SectionLearnings> {
         try {
-            const allLearnings: string[] = [];
-            
-            for (const result of searchResults) {
+            // Process all search results in parallel
+            const learningPromises = searchResults.map(async (result, index) => {
+                this.updateProgress({
+                    step: {
+                        phase: 'Processing Search Results',
+                        current: index + 1,
+                        total: searchResults.length,
+                        detail: `Analyzing: ${result.title}`
+                    },
+                    totalProgress: 40 + (index / searchResults.length) * 20
+                });
+
                 const text = result.content;
                 if (!text) {
                     this.debug('Skipping result with no content:', result.url);
+                    return [];
+                }
+
+                const chunks = this.splitIntoChunks(text);
+                
+                // Process each chunk in parallel with retry
+                const chunkPromises = chunks.map(chunk => 
+                    this.processChunkWithRetry(section, result.url, chunk)
+                );
+
+                const chunkResults = await Promise.all(chunkPromises);
+                return chunkResults.flat();
+            });
+
+            // Wait for all learning extractions to complete
+            const allLearnings = await Promise.all(learningPromises);
+            const flatLearnings = allLearnings.flat();
+
+            // Only fail if we got no learnings at all
+            if (flatLearnings.length === 0) {
+                throw new Error('No learnings could be extracted from any search results');
+            }
+
+            return {
+                section,
+                learnings: flatLearnings
+            };
+
+        } catch (error) {
+            this.debug('Error processing search results:', error);
+            throw new Error(`Failed to process search results: ${(error as Error).message}`);
+        }
+    }
+
+    async synthesizeSections(topic: string, sections: string[]): Promise<void> {
+        try {
+            this.currentTopic = topic;
+            // Synthesize all sections in parallel
+            const synthesisPromises = sections.map(async (section, index) => {
+                this.updateProgress({
+                    step: {
+                        phase: 'Synthesizing Sections',
+                        current: index + 1,
+                        total: sections.length,
+                        detail: `Writing: ${section}`
+                    },
+                    totalProgress: 80 + (index / sections.length) * 15
+                });
+
+                const sectionLearnings = this.sectionLearnings.find(sl => sl.section === section);
+                if (!sectionLearnings) {
+                    throw new Error(`No learnings found for section: ${section}`);
+                }
+
+                const prompt = RESEARCH_PROMPTS.SYNTHESIZE(topic, section, sectionLearnings.learnings);
+                const content = await this.getChatCompletion(prompt);
+                
+                return { section, content };
+            });
+
+            const synthesizedSections = await Promise.all(synthesisPromises);
+            this.sectionContent = synthesizedSections;
+
+        } catch (error) {
+            this.debug('Error synthesizing sections:', error);
+            throw new Error(`Failed to synthesize sections: ${(error as Error).message}`);
+        }
+    }
+
+    getSectionContent(section: string): string {
+        const sectionData = this.sectionContent.find(sc => sc.section === section);
+        return sectionData?.content || '';
+    }
+
+    async getConclusion(topic: string): Promise<string> {
+        const maxRetries = 1;
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                // Get all learnings from all sections
+                const allLearnings = this.sectionLearnings.flatMap(sl => sl.learnings);
+                
+                const prompt = RESEARCH_PROMPTS.CONCLUSION(topic, allLearnings);
+                const response = await this.getChatCompletion(prompt);
+                
+                this.debug('Conclusion response:', response);
+
+                // Validate response format
+                const parsed = JSON.parse(response);
+                if (!Array.isArray(parsed) || !parsed[0]) {
+                    if (attempt < maxRetries) {
+                        this.debug('Invalid conclusion format, retrying...');
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    return JSON.stringify([`## Conclusion\n\n*Failed to generate conclusion.*`]);
+                }
+
+                return response;
+
+            } catch (error) {
+                if (attempt < maxRetries) {
+                    this.debug('Error generating conclusion, retrying:', error);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                     continue;
                 }
-
-                // Split content into chunks
-                const chunks = this.splitIntoChunks(text);
-                this.debug(`Split content into ${chunks.length} chunks`);
-
-                for (const chunk of chunks) {
-                    this.debug('Processing chunk:', {
-                        section,
-                        url: result.url,
-                        chunkLength: chunk.length,
-                    });
-
-                    const prompt = RESEARCH_PROMPTS.LEARNING(
-                        section,
-                        result.url,
-                        chunk
-                    );
-
-                    const response = await this.getChatCompletion(prompt);
-                    const learnings = JSON.parse(response);
-                    allLearnings.push(...learnings);
-                }
+                this.debug('Error generating conclusion after retries:', error);
+                return JSON.stringify([`## Conclusion\n\n*Failed to generate conclusion.*`]);
             }
-
-            // Store learnings for this section
-            const existingSection = this.sectionLearnings.find(sl => sl.section === section);
-            if (existingSection) {
-                existingSection.learnings.push(...allLearnings);
-            } else {
-                this.sectionLearnings.push({
-                    section,
-                    learnings: allLearnings
-                });
-            }
-
-            this.debug('Updated sectionLearnings:', this.sectionLearnings);
-            return allLearnings;
-        } catch (error) {
-            this.debug('Error getting learnings:', error);
-            throw new Error(`Failed to get learnings: ${(error as Error).message}`);
         }
+        
+        return JSON.stringify([`## Conclusion\n\n*Failed to generate conclusion.*`]);
+    }
+
+    async saveResearchToFile(researchData: ResearchData): Promise<void> {
+        try {
+            // Create file content
+            let content = '';
+
+            // Add title as H1
+            content += `# ${researchData.title}\n\n`;
+
+            // Helper function to safely parse and extract content
+            const safeParseContent = (jsonStr: string): string => {
+                try {
+                    // First try to parse as JSON
+                    const parsed = JSON.parse(jsonStr);
+                    if (Array.isArray(parsed) && parsed[0]) {
+                        // First replace escaped newlines with temporary marker
+                        let content = parsed[0]
+                            .replace(/\\n/g, '{{NEWLINE}}')  // Replace escaped newlines with marker
+                            .replace(/[\x00-\x1F\x7F-\x9F]/g, '')  // Clean control characters
+                            .replace(/{{NEWLINE}}{{NEWLINE}}/g, '\n\n')  // Convert double newlines to actual breaks
+                            .replace(/{{NEWLINE}}/g, '\n')  // Convert single newlines to actual breaks
+                            .replace(/\n\n+/g, '\n\n');  // Normalize multiple newlines
+                        
+                        return content;
+                    }
+                    return jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+                } catch (error) {
+                    return jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+                }
+            };
+
+            // Add introduction
+            content += `${safeParseContent(researchData.introduction)}\n\n`;
+
+            // Add each section's content
+            for (const section of researchData.sections) {
+                const sectionContent = this.getSectionContent(section);
+                content += `${safeParseContent(sectionContent)}\n\n`;
+            }
+
+            // Add conclusion
+            content += `${safeParseContent(researchData.conclusion)}\n`;
+
+            // Create folder if it doesn't exist
+            const folderPath = 'Deep Research';
+            if (!await this.app.vault.adapter.exists(folderPath)) {
+                await this.app.vault.createFolder(folderPath);
+            }
+
+            // Use Obsidian's normalizePath for safe file names
+            const fileName = normalizePath(`${folderPath}/${researchData.title}.md`);
+            await this.app.vault.create(fileName, content);
+
+            this.debug('Research file created:', fileName);
+
+        } catch (error) {
+            this.debug('Error saving research file:', error);
+            throw new Error(`Failed to save research file: ${(error as Error).message}`);
+        }
+    }
+
+    private sanitizeFileName(title: string): string {
+        return title.replace(/[\\/:*?"<>|]/g, '-');
+    }
+
+    private updateProgress(progress: ProgressUpdate) {
+        this.view.updateProgress(progress);
     }
 
     getLearningsForSection(section: string): string[] {
@@ -568,28 +708,53 @@ export class ResearchManager {
     }
 
     async getGaps(section: string): Promise<string[]> {
-        try {
-            const provider = ProviderFactory.createLLMProvider(this.settings);
-            if (!provider) {
-                throw new Error('No LLM provider configured');
+        const maxRetries = 1;
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const learnings = this.getLearningsForSection(section);
+                if (!learnings.length) {
+                    this.debug('No learnings found for section:', section);
+                    return [];
+                }
+
+                const prompt = RESEARCH_PROMPTS.GAP(section, learnings);
+                const response = await this.getChatCompletion(prompt);
+                
+                this.debug('Gaps response:', response);
+                
+                // Try to clean the response if it contains markdown
+                let cleanResponse = response;
+                if (response.includes('```')) {
+                    cleanResponse = response.replace(/```json\n|\n```/g, '');
+                }
+                
+                const gaps = JSON.parse(cleanResponse);
+                
+                // Validate response format
+                if (!Array.isArray(gaps) || gaps.some(g => typeof g !== 'string')) {
+                    if (attempt < maxRetries) {
+                        this.debug('Invalid gaps format, retrying...');
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    throw new Error('Invalid gaps format returned from LLM');
+                }
+                
+                return gaps;
+
+            } catch (error) {
+                if (attempt < maxRetries) {
+                    this.debug('Error finding gaps, retrying:', error);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+                this.debug('Error finding gaps:', error);
+                throw new Error(`Failed to find knowledge gaps: ${(error as Error).message}`);
             }
-
-            const learnings = this.getLearningsForSection(section);
-            if (!learnings.length) {
-                this.debug('No learnings found for section:', section);
-                return [];
-            }
-
-            const prompt = RESEARCH_PROMPTS.GAP(section, learnings);
-            const response = await this.getChatCompletion(prompt);
-            
-            this.debug('Gaps response:', response);
-            return JSON.parse(response);
-
-        } catch (error) {
-            this.debug('Error finding gaps:', error);
-            throw new Error(`Failed to find knowledge gaps: ${(error as Error).message}`);
         }
+        
+        return [];
     }
 
     async synthesizeSection(section: string): Promise<string> {
@@ -605,7 +770,7 @@ export class ResearchManager {
                 return '';
             }
 
-            const prompt = RESEARCH_PROMPTS.SYNTHESIZE(section, learnings);
+            const prompt = RESEARCH_PROMPTS.SYNTHESIZE(this.currentTopic, section, learnings);
             const response = await this.getChatCompletion(prompt);
             
             this.debug('Synthesis response:', response);
@@ -615,69 +780,5 @@ export class ResearchManager {
             this.debug('Error synthesizing section:', error);
             throw new Error(`Failed to synthesize section: ${(error as Error).message}`);
         }
-    }
-
-    getSectionContent(section: string): string {
-        const sectionData = this.sectionContent.find(sc => sc.section === section);
-        return sectionData?.content || '';
-    }
-
-    async getConclusion(topic: string): Promise<string> {
-        try {
-            // Get all learnings from all sections
-            const allLearnings = this.sectionLearnings.flatMap(sl => sl.learnings);
-            
-            const prompt = RESEARCH_PROMPTS.CONCLUSION(topic, allLearnings);
-            const response = await this.getChatCompletion(prompt);
-            
-            this.debug('Conclusion response:', response);
-            return response;
-
-        } catch (error) {
-            this.debug('Error generating conclusion:', error);
-            throw new Error(`Failed to generate conclusion: ${(error as Error).message}`);
-        }
-    }
-
-    async saveResearchToFile(researchData: ResearchData): Promise<void> {
-        try {
-            // Create file content
-            let content = '';
-
-            // Add title as H1
-            content += `# ${researchData.title}\n\n`;
-
-            // Add introduction
-            content += `${JSON.parse(researchData.introduction)[0]}\n\n`;
-
-            // Add each section's content
-            for (const section of researchData.sections) {
-                const sectionContent = this.getSectionContent(section);
-                content += `${JSON.parse(sectionContent)[0]}\n\n`;
-            }
-
-            // Add conclusion
-            content += `${JSON.parse(researchData.conclusion)[0]}\n`;
-
-            // Create folder if it doesn't exist
-            const folderPath = 'Deep Research';
-            if (!await this.app.vault.adapter.exists(folderPath)) {
-                await this.app.vault.createFolder(folderPath);
-            }
-
-            // Create file with sanitized title
-            const fileName = `${folderPath}/${this.sanitizeFileName(researchData.title)}.md`;
-            await this.app.vault.create(fileName, content);
-
-            this.debug('Research file created:', fileName);
-
-        } catch (error) {
-            this.debug('Error saving research file:', error);
-            throw new Error(`Failed to save research file: ${(error as Error).message}`);
-        }
-    }
-
-    private sanitizeFileName(title: string): string {
-        return title.replace(/[\\/:*?"<>|]/g, '-');
     }
 } 

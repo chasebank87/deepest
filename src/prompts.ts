@@ -30,9 +30,9 @@ export const SYSTEM_PROMPTS = {
 - Follow current best practices in the field
 
 5. Response Structure
-- Return only the requested JSON format
 - Never mirror example data in actual responses
 - Adapt depth and complexity to the context
+- Follow the example output format exactly (dont use the data just the format!)
 
 6. Scope Management
 - Stay focused on the specified section/topic
@@ -79,6 +79,7 @@ export const SYSTEM_PROMPTS = {
 - Never include raw HTML
 - Follow consistent spacing rules
 - Use horizontal rules (---) sparingly
+- Follow the example output format exactly (dont use the data just the format!)
 
 7. Research Standards
 - Cite all sources accurately
@@ -128,18 +129,19 @@ export const RESEARCH_PROMPTS = {
 `,
 
     INTRO: (topic: string, sections: string[]) => `
-<prompt>You are an introduction generator for a research application. You will receive a research topic and a JSON array of sections for a report. Your output must adhere to these rules:
+<prompt>You are an introduction writer for a research application. Create a compelling introduction that outlines the scope and significance of the research. Follow these guidelines:
 
-- Return a single JSON array containing exactly one string.
-- That string must include a Markdown heading “## Introduction” at the start.
-- The text following the heading should summarize the topic’s importance and briefly preview the sections in no more than 250 words.
-- Provide no additional formatting or text beyond this array with the single string.</prompt>
+- The markdown string must be an array of a single string.
+- Present the topic's importance and context.
+- Preview the main sections to be covered.
+- Use actual line breaks between paragraphs, not escape sequences.</prompt>
 
 <input>${JSON.stringify({ topic, sections })}</input>
 
-<example_input> { "topic": "Quantum Computing", "sections": [ "Key Principles and Terminology", "Quantum Algorithms and Their Structure", "Cryptographic Applications and Security", "Optimization Problems and Solutions", "Software Integration Approaches", "Current Hardware Limitations", "Future Development Roadmap" ] } </example_input>
+<example_input> { "topic": "Quantum Computing", "sections": ["Basic Principles", "Current Applications"] } </example_input>
 
-<example_output> ["## Introduction\n\nThis report examines quantum computing, a rapidly advancing field that merges physics and computer science. By exploring foundational principles, emerging algorithms, and potential security benefits, we uncover how quantum computing challenges traditional computational limits. Quantum technologies hold promise in areas such as cryptography, optimization, and innovative software design. Yet, scaling these systems remains a significant obstacle, with hardware reliability and error correction at the forefront of ongoing research. By reviewing each section, readers will gain a broad overview of key concepts, learn about practical approaches to implementation, and grasp the role of current research in shaping future breakthroughs. This introduction sets the stage for understanding quantum computing’s power, complexities, and capacity to transform computational paradigms."] </example_output>`,
+<example_output> ["Quantum computing represents a revolutionary approach to information processing, promising to transform fields from cryptography to drug discovery. This research explores the fundamental concepts and practical applications of quantum computing technology.\\n\\nThe following sections will examine the basic principles underlying quantum computation and survey its current real-world applications, providing a comprehensive overview of this emerging technology."] </example_output>
+`,
 
     SERP: (topic: string, section: string, breadth: number, gaps?: string[]) => `
 <prompt>You are a SERP query generator for a research application. You will receive a topic, a specific section, a desired breadth value, and optionally a list of gaps. If the gaps array is provided and not empty, you must generate all queries based on those gaps. Otherwise, base your queries on the topic and section. The number of queries in the JSON array should match the provided breadth value. Each query must be concise and clearly aligned with its source (gaps or section). Return only the JSON array with no extra text or formatting.</prompt>
@@ -155,6 +157,7 @@ export const RESEARCH_PROMPTS = {
 <prompt>You are a learning extractor for a research application. You will receive a section title, a URL, and a text. Generate concise but complete learnings relevant to the section title by examining the text. Each learning must cite the given URL as its source. Return only a JSON array, where each element is a string containing the learning and its source, with no additional formatting or commentary.</prompt>
 
 <rules>
+- limit learnings to 10
 - Each learning must be concise and to the point.
 - Each learning must cite the given URL as its source.
 - Each learning must be relevant to the section title.
@@ -185,7 +188,7 @@ export const RESEARCH_PROMPTS = {
 <example_output> [ "Investigate how superposition is maintained in noisy quantum environments", "Explore the limitations of entanglement in large-scale quantum systems", "Examine additional quantum phenomena that might influence computational power" ] </example_output>
 `,
 
-    SYNTHESIZE: (section: string, learnings: string[]) => `
+    SYNTHESIZE: (topic: string, section: string, learnings: string[]) => `
 <prompt>You are a section synthesizer for a research application. You will receive a section title and a list of learnings, each containing a statement with a source URL. Combine these learnings into one or two paragraphs that form a concise, logical narrative. Follow these guidelines:
 
 - The markdown string must be an array of a single string.
@@ -193,26 +196,30 @@ export const RESEARCH_PROMPTS = {
 - Present all learning points coherently.
 - Each paragraph must be no more than 100–200 words.
 - Place each source link inline at the end of the data point, using [ShortSource](URL) without embedding it into the sentence text itself.
-- Return only the synthesized markdown section text, with no extra explanation or formatting beyond these rules. </prompt>
+- Use actual line breaks between paragraphs, not escape sequences.
+- Return only the synthesized markdown section text, with no extra explanation or formatting beyond these rules.</prompt>
+
 <input>${JSON.stringify({ section, learnings })}</input>
 
 <example_input> { "section": "Key Principles and Terminology", "learnings": [ "Quantum computing uses superposition and entanglement to process data in novel ways [source: https://example.com/quantum-principles]", "Qubits can hold multiple states at once, offering exponential speed improvements for some tasks [source: https://another.org/qbit-info]" ] } </example_input>
 
-<example_output> ["## Key Principles and Terminology\n\nQuantum computing uses superposition and entanglement to process data in novel ways example.com. Qubits can hold multiple states simultaneously, enabling exponential speedups for certain tasks another.org."] </example_output>`,
+<example_output> ["## Key Principles and Terminology\\n\\nQuantum computing uses superposition and entanglement to process data in novel ways [example.com].\\n\\nQubits can hold multiple states simultaneously, enabling exponential speedups for certain tasks [another.org]."] </example_output>
+`,
 
     CONCLUSION: (topic: string, learnings: string[]) => `
-<prompt>You are a conclusion generator for a research application. You will receive the main topic and all key learnings from a report. Create a concise yet detailed conclusion in Markdown, referencing how the learnings connect to the topic. Follow these rules:
+<prompt>You are a conclusion writer for a research application. Synthesize the key findings and implications from all learnings into a concise conclusion. Follow these guidelines:
 
-- Return a single JSON array containing exactly one string.
-- That string must include a Markdown heading "## Conclusion" and one or more paragraphs summarizing all learnings.
-- Provide a clear conclusive statement if the learnings allow. If not, acknowledge any open-ended uncertainties.
-- Output no additional formatting or text beyond this array with the single string.</prompt>
+- The markdown string must be an array of a single string.
+- Begin with a markdown heading (## Conclusion).
+- Present a cohesive summary of the research.
+- Each paragraph must be no more than 100–200 words.
+- Use actual line breaks between paragraphs, not escape sequences.</prompt>
 
 <input>${JSON.stringify({ topic, learnings })}</input>
 
-<example_input> { "topic": "AI in Hollywood", "learnings": [ "AI-driven special effects are becoming more realistic [source: https://vfxnews.org/ai-effects]", "Machine learning refines scripts for target audiences [source: https://scriptlab.org/ml-scripts]", "AI is generating potential new roles in film production [source: https://crewjobs.net/ai-roles]" ] } </example_input>
+<example_input> { "topic": "AI in Hollywood", "learnings": ["AI is transforming visual effects production [source: example.com/vfx]", "Machine learning helps predict audience preferences [source: example.com/ml]"] } </example_input>
 
-<example_output> ["## Conclusion\n\nAI in Hollywood is reshaping the film industry by enhancing visual effects and refining script development to meet audience expectations. Machine learning techniques allow creators to customize stories more precisely, while AI technologies generate new roles and opportunities within production teams. These shifts indicate a growing influence of data-driven approaches on creativity, pushing the boundaries of traditional filmmaking.\n\nOverall, the current evidence suggests that AI holds immense potential to revolutionize Hollywood's workflow, though its full impact on artistic expression and employment structures remains to be seen. Further research will help clarify how filmmakers, studios, and audiences can best adapt to this evolving landscape."] </example_output>
+<example_output> ["## Conclusion\\n\\nAI in Hollywood is reshaping the film industry by enhancing visual effects and refining script development to meet audience expectations. Machine learning techniques allow creators to customize stories more precisely, while AI technologies generate new roles and opportunities within production teams.\\n\\nOverall, the current evidence suggests that AI holds immense potential to revolutionize Hollywood's workflow, though its full impact on artistic expression and employment structures remains to be seen."] </example_output>
 `
 } as const;
 
@@ -223,4 +230,4 @@ export function formatPrompt(template: string, ...args: any[]): string {
         result = result.replace(`{${i}}`, arg);
     });
     return result;
-} 
+}

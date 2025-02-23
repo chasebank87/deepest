@@ -35,6 +35,12 @@ export interface DeepestSettings {
     // Research settings
     breadth: number;
     depth: number;
+
+    // Rate limiting
+    llmRateLimitEnabled: boolean;
+    webSearchRateLimitEnabled: boolean;
+    llmRateLimit: number;
+    webSearchRateLimit: number;
 }
 
 export const DEFAULT_SETTINGS: DeepestSettings = {
@@ -57,4 +63,8 @@ export const DEFAULT_SETTINGS: DeepestSettings = {
     debugMode: false,
     breadth: 5,
     depth: 3,
+    llmRateLimitEnabled: true,
+    webSearchRateLimitEnabled: true,
+    llmRateLimit: 10,
+    webSearchRateLimit: 10,
 }; 
