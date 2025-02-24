@@ -379,15 +379,44 @@ export class DeepestSettingTab extends PluginSettingTab {
                     await (this.plugin as any).saveSettings();
                 }));
 
-        new Setting(containerEl)
+        // Debug Settings Section
+        containerEl.createEl('h2', { text: 'Debug settings' });
+        const debugSettingsContainer = containerEl.createDiv('debug-settings-group');
+
+        // Add CSS class to remove borders between items
+        debugSettingsContainer.addClass('no-border-settings');
+
+        new Setting(debugSettingsContainer)
             .setName('Debug Mode')
-            .setDesc('Enable debug logging to console')
+            .setDesc('Enable debug logging')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.debugMode)
                 .onChange(async (value) => {
                     this.plugin.settings.debugMode = value;
-                    await this.plugin.saveSettings();
+                    this.display();
                 }));
+
+        new Setting(debugSettingsContainer)
+            .setName('Include Requests')
+            .setDesc('Include API requests in debug logs')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.includeRequests)
+                .onChange(async (value) => {
+                    this.plugin.settings.includeRequests = value;
+                    await this.plugin.saveSettings();
+                }))
+            .setDisabled(!this.plugin.settings.debugMode);
+
+        new Setting(debugSettingsContainer)
+            .setName('Include Reasoning')
+            .setDesc('Include AI reasoning in debug logs')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.includeReasoning)
+                .onChange(async (value) => {
+                    this.plugin.settings.includeReasoning = value;
+                    await this.plugin.saveSettings();
+                }))
+            .setDisabled(!this.plugin.settings.debugMode);
     }
 
     private async refreshOpenRouterModels() {

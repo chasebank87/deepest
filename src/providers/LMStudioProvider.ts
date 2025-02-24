@@ -29,71 +29,61 @@ export class LMStudioProvider implements LLMProvider {
         }
     }
 
+    async testConnection(): Promise<boolean> {
+        try {
+            const response = await requestUrl({
+                url: `${this.baseUrl}/v1/models`,
+                method: 'GET'
+            });
+            
+            if (response.status !== 200) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return true;
+        } catch (error) {
+            throw new Error(`LMStudio server not accessible: ${(error as Error).message}`);
+        }
+    }
+
     async chatCompletion(prompt: string, systemPrompt: string, options?: {
         maxTokens?: number;
         temperature?: number;
     }): Promise<string> {
         try {
+            // First verify server is accessible
+            await this.testConnection();
+
             const response = await requestUrl({
                 url: `${this.baseUrl}/v1/chat/completions`,
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    model: this.settings.selectedModel,
                     messages: [
-                        { role: 'user', content: prompt }
-                    ],
-                    response_format: {
-                        type: "json_schema",
-                        json_schema: {
-                            name: "research_questions",
-                            schema: {
-                                type: "object",
-                                properties: {
-                                    data: {
-                                        type: "object",
-                                        properties: {
-                                            think: { type: "string" },
-                                            output: {
-                                                type: "array",
-                                                items: { type: "string" }
-                                            }
-                                        },
-                                        required: ["output"]
-                                    }
-                                },
-                                required: ["data"]
-                            }
+                        {
+                            role: 'system',
+                            content: systemPrompt
+                        },
+                        {
+                            role: 'user',
+                            content: prompt
                         }
-                    },
-                    temperature: options?.temperature || this.settings.temperature,
+                    ],
                     max_tokens: options?.maxTokens || this.settings.maxTokens,
+                    temperature: options?.temperature || this.settings.temperature,
                     stream: false
                 })
             });
 
             if (response.status !== 200) {
-                throw new Error(`Chat completion failed: ${response.status}`);
+                throw new Error(`Request failed, status ${response.status}. Please ensure LMStudio server is running at ${this.baseUrl}`);
             }
 
-            const result = response.json.choices[0].message.content;
-            const parsed = JSON.parse(result);
-            return JSON.stringify(parsed.data.output);
+            const data = response.json;
+            return data.choices[0].message.content;
         } catch (error) {
-            console.error('Error getting chat completion from LM Studio:', error);
-            throw error;
-        }
-    }
-
-    async testConnection(): Promise<boolean> {
-        try {
-            const models = await this.getModels();
-            return models.length > 0;
-        } catch (error) {
-            console.error('LM Studio connection test failed:', error);
-            return false;
+            throw new Error(`LMStudio request failed: ${(error as Error).message}`);
         }
     }
 } 

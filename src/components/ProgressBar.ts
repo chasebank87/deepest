@@ -11,13 +11,21 @@ export class ProgressBar {
         this.progressBar = progressContainer.createEl('div', { cls: 'progress-bar' });
         
         const labelContainer = this.container.createEl('div', { cls: 'progress-labels' });
-        this.phaseLabel = labelContainer.createEl('div', { cls: 'phase-label' });
-        this.detailLabel = labelContainer.createEl('div', { cls: 'detail-label' });
+        this.phaseLabel = labelContainer.createEl('div', { 
+            cls: 'phase-label',
+            text: 'Initializing...'
+        });
+        this.detailLabel = labelContainer.createEl('div', { 
+            cls: 'detail-label',
+            text: 'Getting ready...'
+        });
     }
 
     update(progress: ProgressUpdate) {
         this.progressBar.style.width = `${progress.totalProgress}%`;
-        this.phaseLabel.textContent = `${progress.step.phase} (${progress.step.current}/${progress.step.total})`;
-        this.detailLabel.textContent = progress.step.detail || '';
+        this.phaseLabel.setText(
+            `${progress.step.phase} (${progress.step.current}/${progress.step.total})`
+        );
+        this.detailLabel.setText(progress.step.detail || '');
     }
 } 

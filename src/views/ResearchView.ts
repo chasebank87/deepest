@@ -11,8 +11,11 @@ export class ResearchView extends ItemView {
     private loadingSpinner: HTMLElement;
     private initialMessage: HTMLElement;
     private questionSection: HTMLElement;
+    private currentSectionLabel: HTMLElement;
     private researchManager: ResearchManager;
     private progressBar: ProgressBar;
+    private cancelButton: HTMLElement;
+    private progressContainer: HTMLElement;
     
     // State management
     private currentTopic: string = '';
@@ -25,10 +28,11 @@ export class ResearchView extends ItemView {
 
     constructor(leaf: WorkspaceLeaf) {
         super(leaf);
-        // Create ResearchManager and pass this view instance
+        // Create ResearchManager and pass this view instance and app
         this.researchManager = new ResearchManager(
             (this.app as any).plugins.plugins['deepest'].settings,
-            this
+            this,
+            this.app
         );
     }
 
@@ -44,7 +48,6 @@ export class ResearchView extends ItemView {
         const container = this.containerEl.children[1];
         container.empty();
         
-        // Main container with centered content
         const mainContainer = container.createEl('div', { cls: 'research-view' });
 
         // Logo/Title section
@@ -112,21 +115,19 @@ export class ResearchView extends ItemView {
             cls: 'loading-spinner'
         });
 
-        // Create a container for both the question section and initial message
-        const contentSection = mainContainer.createEl('div', { cls: 'research-content-section' });
-
         // Question section (hidden initially)
-        this.questionSection = contentSection.createEl('div', { cls: 'research-question-section' });
+        this.questionSection = mainContainer.createEl('div', { cls: 'research-question-section' });
         
         // Initial message
-        this.initialMessage = contentSection.createEl('div', { cls: 'research-initial-message' });
+        this.initialMessage = mainContainer.createEl('div', { cls: 'research-initial-message' });
         this.initialMessage.createEl('p', { 
             text: 'Enter a topic above to start your research journey',
             cls: 'message-text'
         });
 
-        // Create progress bar (initially hidden)
-        this.progressBar = new ProgressBar(mainContainer);
+        // Create content section last
+        const contentSection = this.createContentSection();
+        mainContainer.appendChild(contentSection);
 
         // Add event listeners
         this.searchInput.addEventListener('keydown', (e) => {
@@ -134,6 +135,51 @@ export class ResearchView extends ItemView {
                 this.handleSearch();
             }
         });
+    }
+
+    private createContentSection() {
+        // Create research content section
+        const contentSection = this.containerEl.createEl('div', { 
+            cls: 'research-content-section' 
+        });
+
+        // Create current section label
+        this.currentSectionLabel = contentSection.createEl('div', { 
+            cls: 'current-section-label'
+        });
+
+        // Create text span for section info
+        const sectionText = this.currentSectionLabel.createSpan({
+            cls: 'section-text'
+        });
+
+        // Create cancel button
+        this.cancelButton = this.currentSectionLabel.createEl('button', {
+            cls: 'research-cancel-button',
+            attr: { 'aria-label': 'Cancel Research' }
+        });
+        this.cancelButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+        
+        // Update click handler to use try/catch
+        this.cancelButton.addEventListener('click', async (e) => {
+            e.preventDefault();
+            try {
+                await this.handleCancel();
+            } catch (error) {
+                console.debug('Cancel button click error:', error);
+                this.resetView();
+            }
+        });
+
+        // Create progress container
+        this.progressContainer = contentSection.createEl('div', { 
+            cls: 'research-progress-container' 
+        });
+        
+        // Initialize progress bar
+        this.progressBar = new ProgressBar(this.progressContainer);
+
+        return contentSection;
     }
 
     private async handleSearch() {
@@ -263,11 +309,31 @@ export class ResearchView extends ItemView {
             // Add slide-out animation to question section
             this.questionSection.addClass('slide-out');
             
-            // Show progress bar after animation
-            setTimeout(() => {
-                this.progressBar.container.addClass('visible');
-            }, 500);
+            // Wait for slide-out animation to complete
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Show content section with animation
+            const contentSection = this.containerEl.querySelector('.research-content-section');
+            if (contentSection) {
+                contentSection.addClass('visible');
+            }
+            
+            // Show progress elements with animation
+            if (this.progressContainer) {
+                this.progressContainer.removeClass('hidden');
+                this.progressContainer.addClass('visible');
+            }
+            
+            if (this.currentSectionLabel) {
+                this.currentSectionLabel.removeClass('hidden');
+                this.currentSectionLabel.addClass('visible');
+            }
 
+            // Show cancel button
+            if (this.cancelButton) {
+                this.cancelButton.removeClass('hidden');
+            }
+            
             // Start deep research
             const researchData = await this.researchManager.deepResearch(
                 this.currentTopic,
@@ -278,18 +344,139 @@ export class ResearchView extends ItemView {
             
             // Handle research completion
             // We'll add this later
-
+            
+            // Hide cancel button on completion
+            this.cancelButton.addClass('hidden');
+            
         } catch (error) {
-            new Notice(`Error: ${(error as Error).message}`);
+            // Handle cancellation gracefully
+            if (error instanceof Error && error.message === 'Research cancelled by user') {
+                this.resetView();
+                return;
+            }
+            
+            // Handle other errors
+            this.resetView();
+            new Notice(`Research failed: ${(error as Error).message}`);
         }
     }
 
-    // Add method to update progress
+    private async handleCancel() {
+        try {
+            await this.researchManager.cancelResearch();
+            
+            // Hide content section
+            const contentSection = this.containerEl.querySelector('.research-content-section');
+            if (contentSection) {
+                contentSection.removeClass('visible');
+            }
+
+            // Reset the view
+            this.resetView();
+            new Notice('Research cancelled');
+        } catch (error) {
+            console.error('Error during cancel:', error);
+            this.resetView();
+            new Notice(`Error cancelling research: ${(error as Error).message}`);
+        }
+    }
+
+    private resetView() {
+        // Show search elements
+        this.searchInput?.removeClass('hidden');
+        this.searchIcon?.removeClass('hidden');
+        this.initialMessage?.removeClass('hidden');
+        
+        // Hide and reset progress elements
+        if (this.progressContainer) {
+            this.progressContainer.empty();
+            this.progressContainer.removeClass('visible');
+            this.progressContainer.addClass('hidden');
+        }
+        
+        // Hide content section
+        const contentSection = this.containerEl.querySelector('.research-content-section');
+        if (contentSection) {
+            contentSection.removeClass('visible');
+        }
+        
+        if (this.currentSectionLabel) {
+            this.currentSectionLabel.removeClass('visible');
+            this.currentSectionLabel.addClass('hidden');
+        }
+        
+        if (this.cancelButton) {
+            this.cancelButton.addClass('hidden');
+        }
+        
+        // Reset state
+        this.currentTopic = '';
+        this.answers = [];
+        this.currentQuestions = [];
+        this.currentQuestionIndex = 0;
+
+        // Re-enable and clear input
+        if (this.searchInput) {
+            this.searchInput.disabled = false;
+            this.searchInput.value = '';
+        }
+    }
+
+    // Update section display with count
+    updateCurrentSection(section: string, current: number, total: number) {
+        if (!this.currentSectionLabel) return;
+        
+        const sectionText = this.currentSectionLabel.querySelector('.section-text');
+        if (sectionText) {
+            sectionText.textContent = `Current Section (${current}/${total}): ${section}`;
+        }
+        
+        this.currentSectionLabel.style.display = 'flex';
+        this.currentSectionLabel.style.opacity = '1';
+        this.currentSectionLabel.style.visibility = 'visible';
+    }
+
+    // Update progress method
     updateProgress(progress: ProgressUpdate) {
-        this.progressBar.update(progress);
+        if (this.progressBar) {
+            this.progressBar.update(progress);
+        }
+        
+        // Update section label if available
+        if (progress.step.phase && this.currentSectionLabel) {
+            const sectionText = this.currentSectionLabel.querySelector('.section-text');
+            if (sectionText) {
+                sectionText.textContent = `${progress.step.phase} (${progress.step.current}/${progress.step.total})`;
+            }
+        }
     }
 
     async onClose() {
         // Nothing to clean up yet
+    }
+
+    private async startResearch() {
+        try {
+            // Hide search elements
+            this.searchInput?.addClass('hidden');
+            this.searchIcon?.addClass('hidden');
+            this.initialMessage?.addClass('hidden');
+            
+            // Clear previous research state
+            this.currentTopic = this.searchInput.value.trim();
+            this.answers = [];
+            
+            // Start research
+            const result = await this.researchManager.deepResearch(
+                this.currentTopic,
+                this.answers,
+                this.depth,
+                this.breadth
+            );
+            
+        } catch (error) {
+            new Notice(`Research failed: ${(error as Error).message}`);
+            this.resetView();
+        }
     }
 }

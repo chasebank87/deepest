@@ -41,6 +41,13 @@ export interface DeepestSettings {
     webSearchRateLimitEnabled: boolean;
     llmRateLimit: number;
     webSearchRateLimit: number;
+
+    // Request logging
+    includeRequests: boolean;
+    outputDirectory: string;
+
+    // Reasoning
+    includeReasoning: boolean;
 }
 
 export const DEFAULT_SETTINGS: DeepestSettings = {
@@ -67,4 +74,7 @@ export const DEFAULT_SETTINGS: DeepestSettings = {
     webSearchRateLimitEnabled: true,
     llmRateLimit: 10,
     webSearchRateLimit: 10,
+    includeRequests: false,
+    outputDirectory: 'Deepest Research',
+    includeReasoning: false
 }; 

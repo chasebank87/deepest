@@ -13,6 +13,9 @@ export class ResearchManager {
     private sectionLearnings: SectionLearnings[] = [];
     private sectionContent: { section: string; content: string }[] = [];
     private currentTopic: string = '';
+    private currentReasoning: string = '';
+    private breadth: number;
+    private isCanceled: boolean = false;
 
     constructor(
         private settings: DeepestSettings, 
@@ -20,11 +23,14 @@ export class ResearchManager {
         private app: App
     ) {
         this.view = view;
+        this.breadth = 5;  // Initialize with default value
     }
 
-    private debug(message: string, data?: any) {
+    private debug(message: string, data?: any, isRequest: boolean = false) {
         if (this.settings.debugMode) {
-            console.log(`[Deepest Debug] ${message}`, data || '');
+            if (!isRequest || this.settings.includeRequests) {
+                console.log(`[Deepest Debug] ${message}`, data || '');
+            }
         }
     }
 
@@ -40,15 +46,35 @@ export class ResearchManager {
             RESEARCH_PROMPTS.CONCLUSION.toString()
         ];
 
-        // All other prompts should use MAIN (they return JSON)
         const systemPrompt = markdownPrompts.some(p => prompt.startsWith(p)) 
             ? SYSTEM_PROMPTS.MARK_MAIN 
             : SYSTEM_PROMPTS.MAIN;
         
-        return provider.chatCompletion(prompt, systemPrompt, {
+        // Log the request if enabled
+        this.debug('Request:', { prompt, systemPrompt }, true);
+        
+        const response = await provider.chatCompletion(prompt, systemPrompt, {
             maxTokens: this.settings.maxTokens,
             temperature: this.settings.temperature
         });
+
+        // Extract thinking section if present
+        const thinkMatch = response.match(/<think>(.*?)<\/think>/s);
+        if (thinkMatch) {
+            this.currentReasoning = thinkMatch[1].trim();
+            // Only debug reasoning if enabled
+            if (this.settings.includeReasoning) {
+                this.debug('AI Reasoning:', this.currentReasoning);
+            }
+            // Return everything after </think>
+            const outputMatch = response.match(/<\/think>(.*?)$/s);
+            return outputMatch ? outputMatch[1].trim() : response;
+        } else {
+            if (this.settings.includeReasoning) {
+                this.debug('AI Reasoning: No reasoning provided');
+            }
+            return response;
+        }
     }
 
     async getFeedbackQuestions(topic: string): Promise<string[]> {
@@ -58,58 +84,60 @@ export class ResearchManager {
                 throw new Error('No LLM provider configured');
             }
 
+            this.debug('Generating feedback questions for topic:', topic);
+
             const prompt = CHAT_PROMPTS.FEEDBACK(topic);
             const response = await this.getChatCompletion(prompt);
             
-            // Response is already a JSON string of the output array
-            const questions = JSON.parse(response);
-            if (!Array.isArray(questions) || questions.length !== 3) {
-                throw new Error('Invalid response format');
+            this.debug('Feedback questions response:', response);
+
+            const contentAfterThink = response
+                .replace(/<think>[\s\S]*?<\/think>/, '')
+                .replace(/^\n+/, '');
+            
+            this.debug('Content after think:', contentAfterThink);
+
+            const questions = contentAfterThink
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0 && line.endsWith('?'));
+
+            if (questions.length !== 3) {
+                this.debug('Invalid number of questions:', questions.length);
+                throw new Error('Invalid response format - expected exactly 3 questions');
             }
 
             return questions;
+
         } catch (error) {
+            this.debug('Error getting feedback questions:', error);
             throw new Error(`Failed to get feedback questions: ${(error as Error).message}`);
         }
     }
 
-    async getSections(topic: string, answers: ResearchAnswer[], breadth: number): Promise<string[]> {
+    private async getSections(topic: string, feedback: ResearchAnswer[], breadth: number): Promise<string[]> {
         try {
-            const provider = ProviderFactory.createLLMProvider(this.settings);
-            if (!provider) {
-                throw new Error('No LLM provider configured');
-            }
-            
-            this.debug('Generating sections with:', {
-                topic,
-                answers,
-                breadth
-            });
-
-            // Format the feedback data to include both questions and answers
-            const feedbackData = answers.map(a => ({
-                question: a.question,
-                answer: a.answer
-            }));
-
-            const prompt = RESEARCH_PROMPTS.SECTIONS(
-                topic,
-                feedbackData,
-                breadth
-            );
-
+            const prompt = RESEARCH_PROMPTS.SECTIONS(topic, feedback, breadth);
             const response = await this.getChatCompletion(prompt);
             
-            this.debug('Sections response:', response);
-
-            const sections = JSON.parse(response);
+            // Split response into sections
+            const sections = response
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
             
-            this.debug('Parsed sections:', sections);
+            // Validate number of sections
+            const expectedSections = breadth + 2;
+            if (sections.length !== expectedSections) {
+                throw new Error(`Invalid number of sections: expected ${expectedSections}, got ${sections.length}`);
+            }
+            
+            this.debug('Generated sections:', sections);
             return sections;
-
+            
         } catch (error) {
             this.debug('Error generating sections:', error);
-            throw new Error(`Failed to generate sections: ${(error as Error).message}`);
+            throw new Error(`Error generating sections: ${(error as Error).message}`);
         }
     }
 
@@ -119,71 +147,95 @@ export class ResearchManager {
 
     async deepResearch(topic: string, answers: ResearchAnswer[], depth: number, breadth: number): Promise<ResearchData> {
         try {
-            this.debug('Starting deep research:', {
-                topic,
-                answers,
-                depth,
-                breadth
-            });
-
+            this.isCanceled = false;  // Reset at start of new research
+            
+            // Initialize progress display immediately
+            this.view.updateProgress(this.createProgressUpdate(
+                'Starting Research',
+                0,
+                1,
+                'Initializing research process...'
+            ));
+            
+            // Reset state
+            this.sectionLearnings = [];
+            this.sectionContent = [];
             this.currentTopic = topic;
+            this.breadth = breadth;
 
             // Step 1: Generate sections
-            this.view.updateProgress(this.createProgressUpdate('Generating Sections', 0, 1));
+            this.checkCancellation();
             const sections = await this.getSections(topic, answers, breadth);
-            this.view.updateProgress(this.createProgressUpdate('Generating Sections', 1, 1));
+            
+            // Update progress with first section immediately after getting sections
+            this.view.updateProgress(this.createProgressUpdate(
+                'Processing Sections',
+                1,
+                sections.length,
+                `Starting with section: ${sections[0]}`
+            ));
 
             // Step 2: Generate title
             this.view.updateProgress(this.createProgressUpdate('Generating Title', 0, 1));
+            this.checkCancellation();
             const title = await this.getTitle(topic, sections);
             this.view.updateProgress(this.createProgressUpdate('Generating Title', 1, 1));
 
             // Step 3: Generate introduction
             this.view.updateProgress(this.createProgressUpdate('Generating Introduction', 0, 1));
+            this.checkCancellation();
             const introduction = await this.getIntro(topic, sections);
             this.view.updateProgress(this.createProgressUpdate('Generating Introduction', 1, 1));
 
-            // Step 4: Process sections in parallel
-            for (let i = 0; i < sections.length; i++) {
-                this.view.updateProgress(this.createProgressUpdate(
-                    'Generating Search Queries',
-                    i,
-                    sections.length,
-                    `For section: ${sections[i]}`
-                ));
+            // Process sections in parallel batches
+            const sectionBatchSize = 2; // Process 2 sections at a time
+            const sectionBatches = [];
+            
+            for (let i = 0; i < sections.length; i += sectionBatchSize) {
+                const batch = sections.slice(i, i + sectionBatchSize);
+                sectionBatches.push(batch);
+            }
 
-                const queries = await this.getQueries(topic, sections[i], breadth);
-                this.debug(`Queries for section "${sections[i]}":`, queries);
-
-                // Search all queries in parallel
-                const searchPromises = queries.map(query => this.search(query, breadth));
-                const allResults = await Promise.all(searchPromises);
+            for (const sectionBatch of sectionBatches) {
+                this.checkCancellation();
                 
-                // Flatten results and process them in parallel
-                const flatResults = allResults.flat();
-                const sectionResult = await this.processSearchResults(flatResults, sections[i]);
-                
-                // Store the learnings
-                this.sectionLearnings.push(sectionResult);
+                // Process each section in the batch in parallel
+                const sectionPromises = sectionBatch.map(async (section) => {
+                    this.updateProgress({
+                        step: {
+                            phase: 'Processing Section',
+                            current: sections.indexOf(section) + 1,
+                            total: sections.length,
+                            detail: `Processing: ${section}`
+                        },
+                        totalProgress: 30 + (sections.indexOf(section) / sections.length) * 40
+                    });
 
-                // Gap analysis and deeper research
-                for (let d = 0; d < depth; d++) {
-                    const gaps = await this.getGaps(sections[i]);
-                    if (gaps.length === 0) break;
+                    // Get initial queries
+                    const queries = await this.getSerpQueries(section, []);
+                    
+                    // Search all queries in parallel
+                    const searchPromises = queries.map(query => this.search(query, breadth));
+                    const searchResults = await Promise.all(searchPromises);
+                    const flatResults = searchResults.flat();
+                    
+                    // Process search results
+                    await this.processSearchResults(section, flatResults);
 
-                    const gapQueries = await this.getQueries(topic, sections[i], breadth, gaps);
-                    
-                    // Process gap queries in parallel
-                    const gapSearchPromises = gapQueries.map(query => this.search(query, breadth));
-                    const gapResults = await Promise.all(gapSearchPromises);
-                    const gapResult = await this.processSearchResults(gapResults.flat(), sections[i]);
-                    
-                    // Store gap learnings
-                    const existingSection = this.sectionLearnings.find(sl => sl.section === sections[i]);
-                    if (existingSection) {
-                        existingSection.learnings.push(...gapResult.learnings);
+                    // Handle gap analysis in parallel batches
+                    for (let d = 0; d < depth; d++) {
+                        this.checkCancellation();
+                        const gaps = await this.getGaps(section);
+                        if (gaps.length === 0) break;
+
+                        const gapQueries = await this.getSerpQueries(section, gaps);
+                        const gapSearchPromises = gapQueries.map(query => this.search(query, breadth));
+                        const gapResults = await Promise.all(gapSearchPromises);
+                        await this.processSearchResults(section, gapResults.flat());
                     }
-                }
+                });
+
+                await Promise.all(sectionPromises);
             }
 
             // Synthesize all sections in parallel
@@ -198,7 +250,16 @@ export class ResearchManager {
                 'Creating final conclusion'
             ));
 
+            this.checkCancellation();
             const conclusion = await this.getConclusion(topic);
+
+            // Add final progress update
+            this.view.updateProgress(this.createProgressUpdate(
+                'Research Complete',
+                1,
+                1,
+                'Research report generated successfully'
+            ));
 
             const researchData: ResearchData = {
                 topic,
@@ -223,8 +284,12 @@ export class ResearchManager {
             return researchData;
 
         } catch (error) {
+            if ((error as Error).message === 'Research cancelled by user') {
+                this.debug('Research cancelled by user');
+                throw error;
+            }
             this.debug('Error in deep research:', error);
-            throw new Error(`Failed to complete deep research: ${(error as Error).message}`);
+            throw new Error(`Research failed: ${(error as Error).message}`);
         }
     }
 
@@ -338,49 +403,55 @@ export class ResearchManager {
         };
     }
 
-    async getQueries(topic: string, section: string, breadth: number, gaps?: string[]): Promise<string[]> {
-        const maxRetries = 1;
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                const prompt = RESEARCH_PROMPTS.SERP(
-                    topic,
-                    section,
-                    breadth,
-                    gaps
-                );
-
-                const response = await this.getChatCompletion(prompt);
-                this.debug('Search queries response:', response);
-
-                const queries = JSON.parse(response);
-                
-                // Validate response format
-                if (!Array.isArray(queries) || queries.some(q => typeof q !== 'string')) {
-                    if (attempt < maxRetries) {
-                        this.debug('Invalid query format, retrying...');
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        continue;
-                    }
-                    throw new Error('Invalid query format returned from LLM');
-                }
-                
-                this.debug('Parsed queries:', queries);
-                return queries;
-
-            } catch (error) {
-                if (attempt < maxRetries) {
-                    this.debug('Error generating queries, retrying:', error);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    continue;
-                }
-                this.debug('Error generating search queries:', error);
-                throw new Error(`Failed to generate search queries: ${(error as Error).message}`);
+    async getSerpQueries(section: string, gaps?: string[]): Promise<string[]> {
+        try {
+            const provider = ProviderFactory.createLLMProvider(this.settings);
+            if (!provider) {
+                throw new Error('No LLM provider configured');
             }
+
+            this.debug('Generating SERP queries for:', { section, gaps });
+
+            const prompt = RESEARCH_PROMPTS.SERP(
+                this.currentTopic,
+                section,
+                this.breadth,
+                gaps
+            );
+
+            const response = await this.getChatCompletion(prompt);
+            
+            this.debug('SERP queries response:', response);
+
+            // Get content after think section and trim leading newlines
+            const contentAfterThink = response
+                .replace(/<think>[\s\S]*?<\/think>/, '')  // Remove think section
+                .replace(/^\n+/, '');  // Remove leading newlines
+            
+            this.debug('Content after think:', contentAfterThink);
+
+            // Split on newlines and clean up
+            const queries = contentAfterThink
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
+
+            if (queries.length === 0) {
+                throw new Error('No valid search queries generated');
+            }
+
+            if (queries.length > this.breadth) {
+                this.debug('Too many queries, truncating to breadth:', this.breadth);
+                queries.length = this.breadth;
+            }
+
+            this.debug('Parsed SERP queries:', queries);
+            return queries;
+
+        } catch (error) {
+            this.debug('Error generating SERP queries:', error);
+            throw new Error(`Failed to generate search queries: ${(error as Error).message}`);
         }
-        
-        // This should never be reached due to the throw above, but TypeScript needs it
-        return [];
     }
 
     async search(query: string, maxResults: number, isRetry: boolean = false): Promise<SearchResult[]> {
@@ -427,19 +498,22 @@ export class ResearchManager {
     }
 
     private splitIntoChunks(text: string): string[] {
-        // Use settings maxTokens * 2 for chunk size
-        const maxChunkTokens = this.settings.maxTokens * 2;
+        // If text is within token limit, return as single chunk
+        if (text.length <= this.settings.maxTokens * 4) {  // Using 4 chars per token approximation
+            return [text];
+        }
+        
+        // Otherwise, proceed with chunking
+        const maxChunkTokens = this.settings.maxTokens;
         const charsPerChunk = maxChunkTokens * 4;  // Rough approximation: 1 token ≈ 4 characters
         
         this.debug('Splitting content with settings:', {
             maxTokens: this.settings.maxTokens,
-            maxChunkTokens,
+            contentLength: text.length,
             charsPerChunk
         });
 
         const chunks: string[] = [];
-        
-        // Split by paragraphs first
         const paragraphs = text.split(/\n\s*\n/);
         let currentChunk = '';
 
@@ -483,63 +557,59 @@ export class ResearchManager {
             try {
                 const prompt = RESEARCH_PROMPTS.LEARNING(section, url, chunk);
                 const response = await this.getChatCompletion(prompt);
-                return JSON.parse(response);
+                // Split response into lines and filter empty lines
+                return response.split('\n').filter(line => line.trim());
             } catch (error) {
                 if (attempt === retryCount) {
                     this.debug(`Failed to process chunk after ${retryCount} attempts:`, error);
-                    return []; // Return empty array instead of throwing
+                    return [];
                 }
-                // Wait briefly before retry
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
         return [];
     }
 
-    private async processSearchResults(searchResults: SearchResult[], section: string): Promise<SectionLearnings> {
+    private async processSearchResults(section: string, searchResults: SearchResult[]): Promise<string[]> {
         try {
-            // Process all search results in parallel
-            const learningPromises = searchResults.map(async (result, index) => {
-                this.updateProgress({
-                    step: {
-                        phase: 'Processing Search Results',
-                        current: index + 1,
-                        total: searchResults.length,
-                        detail: `Analyzing: ${result.title}`
-                    },
-                    totalProgress: 40 + (index / searchResults.length) * 20
-                });
-
-                const text = result.content;
-                if (!text) {
-                    this.debug('Skipping result with no content:', result.url);
-                    return [];
-                }
-
-                const chunks = this.splitIntoChunks(text);
-                
-                // Process each chunk in parallel with retry
-                const chunkPromises = chunks.map(chunk => 
-                    this.processChunkWithRetry(section, result.url, chunk)
-                );
-
-                const chunkResults = await Promise.all(chunkPromises);
-                return chunkResults.flat();
-            });
-
-            // Wait for all learning extractions to complete
-            const allLearnings = await Promise.all(learningPromises);
-            const flatLearnings = allLearnings.flat();
-
-            // Only fail if we got no learnings at all
-            if (flatLearnings.length === 0) {
-                throw new Error('No learnings could be extracted from any search results');
+            const batchSize = 3; // Process 3 results at a time
+            const batches = [];
+            const allLearnings: string[] = [];
+            
+            // Create batches
+            for (let i = 0; i < searchResults.length; i += batchSize) {
+                const batch = searchResults.slice(i, i + batchSize);
+                batches.push(batch);
             }
 
-            return {
-                section,
-                learnings: flatLearnings
-            };
+            // Process batches sequentially, but items within each batch in parallel
+            for (const batch of batches) {
+                this.checkCancellation();
+                
+                // Process each result in the batch in parallel
+                const batchPromises = batch.map(result => 
+                    this.extractAndGradeLearnings(section, result.url, result.content || result.snippet)
+                );
+                
+                const batchResults = await Promise.all(batchPromises);
+                
+                // Add filtered learnings to the collection
+                const filteredLearnings = batchResults.flat().filter(learning => learning);
+                allLearnings.push(...filteredLearnings);
+                
+                // Update section learnings (but don't duplicate!)
+                const existingSection = this.sectionLearnings.find(sl => sl.section === section);
+                if (existingSection) {
+                    existingSection.learnings.push(...filteredLearnings);
+                } else {
+                    this.sectionLearnings.push({
+                        section,
+                        learnings: filteredLearnings
+                    });
+                }
+            }
+
+            return allLearnings;
 
         } catch (error) {
             this.debug('Error processing search results:', error);
@@ -547,9 +617,89 @@ export class ResearchManager {
         }
     }
 
+    private async extractAndGradeLearnings(section: string, url: string, text: string): Promise<string[]> {
+        const maxRetries = 1;
+        let retryCount = 0;
+
+        while (retryCount <= maxRetries) {
+            try {
+                this.checkCancellation();
+                
+                const prompt = RESEARCH_PROMPTS.LEARNING(
+                    this.currentTopic,
+                    section,
+                    url, 
+                    text,
+                    url
+                );
+                
+                const response = await this.getChatCompletion(prompt);
+                
+                // Parse graded learnings and sort by grade
+                const gradedLearnings = response
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0)
+                    .map(line => {
+                        const [gradeStr, ...rest] = line.split(' ');
+                        const grade = parseInt(gradeStr);
+                        const learning = rest.join(' ');
+                        return { grade, learning };
+                    })
+                    .filter(({ grade }) => !isNaN(grade))
+                    .sort((a, b) => b.grade - a.grade); // Sort by grade descending
+
+                // If no learnings found and we haven't exceeded retries, try again
+                if (gradedLearnings.length === 0 && retryCount < maxRetries) {
+                    this.debug('No learnings found, retrying...', { section, url, retryCount });
+                    retryCount++;
+                    // Wait a bit before retrying
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+
+                // Take only the top 5 learnings
+                const topLearnings = gradedLearnings
+                    .slice(0, 5)
+                    .map(({ learning }) => learning);
+
+                this.debug('Extracted and filtered learnings:', {
+                    section,
+                    url,
+                    originalCount: gradedLearnings.length,
+                    filteredCount: topLearnings.length,
+                    learnings: topLearnings,
+                    retryCount
+                });
+
+                return topLearnings;
+
+            } catch (error) {
+                if (retryCount < maxRetries) {
+                    this.debug('Error extracting learnings, retrying:', error);
+                    retryCount++;
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+                this.debug('Error extracting and grading learnings:', error);
+                return []; // Return empty array on error to maintain flow
+            }
+        }
+
+        return []; // Return empty array if all retries failed
+    }
+
     async synthesizeSections(topic: string, sections: string[]): Promise<void> {
         try {
             this.currentTopic = topic;
+            
+            // Print final learnings for each section before synthesis
+            this.debug('Final learnings before synthesis:', this.sectionLearnings.map(sl => ({
+                section: sl.section,
+                learningCount: sl.learnings.length,
+                learnings: sl.learnings
+            })));
+            
             // Synthesize all sections in parallel
             const synthesisPromises = sections.map(async (section, index) => {
                 this.updateProgress({
@@ -629,66 +779,31 @@ export class ResearchManager {
 
     async saveResearchToFile(researchData: ResearchData): Promise<void> {
         try {
-            // Create file content
-            let content = '';
+            // Sanitize the file name before saving
+            const sanitizedTitle = this.sanitizeFileName(researchData.title);
+            const fileName = `${sanitizedTitle}.md`;
+            const filePath = normalizePath(`${this.settings.outputFolder}/${fileName}`);
 
-            // Add title as H1
-            content += `# ${researchData.title}\n\n`;
-
-            // Helper function to safely parse and extract content
-            const safeParseContent = (jsonStr: string): string => {
-                try {
-                    // First try to parse as JSON
-                    const parsed = JSON.parse(jsonStr);
-                    if (Array.isArray(parsed) && parsed[0]) {
-                        // First replace escaped newlines with temporary marker
-                        let content = parsed[0]
-                            .replace(/\\n/g, '{{NEWLINE}}')  // Replace escaped newlines with marker
-                            .replace(/[\x00-\x1F\x7F-\x9F]/g, '')  // Clean control characters
-                            .replace(/{{NEWLINE}}{{NEWLINE}}/g, '\n\n')  // Convert double newlines to actual breaks
-                            .replace(/{{NEWLINE}}/g, '\n')  // Convert single newlines to actual breaks
-                            .replace(/\n\n+/g, '\n\n');  // Normalize multiple newlines
-                        
-                        return content;
-                    }
-                    return jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-                } catch (error) {
-                    return jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-                }
-            };
-
-            // Add introduction
-            content += `${safeParseContent(researchData.introduction)}\n\n`;
-
-            // Add each section's content
-            for (const section of researchData.sections) {
-                const sectionContent = this.getSectionContent(section);
-                content += `${safeParseContent(sectionContent)}\n\n`;
-            }
-
-            // Add conclusion
-            content += `${safeParseContent(researchData.conclusion)}\n`;
-
-            // Create folder if it doesn't exist
-            const folderPath = 'Deep Research';
-            if (!await this.app.vault.adapter.exists(folderPath)) {
-                await this.app.vault.createFolder(folderPath);
-            }
-
-            // Use Obsidian's normalizePath for safe file names
-            const fileName = normalizePath(`${folderPath}/${researchData.title}.md`);
-            await this.app.vault.create(fileName, content);
-
-            this.debug('Research file created:', fileName);
-
+            // Create content and save file
+            const content = this.formatResearchContent(researchData);
+            await this.app.vault.adapter.write(filePath, content);
+            
+            this.debug('Research saved to:', filePath);
+            new Notice(`Research saved to: ${fileName}`);
         } catch (error) {
-            this.debug('Error saving research file:', error);
-            throw new Error(`Failed to save research file: ${(error as Error).message}`);
+            this.debug('Error saving research:', error);
+            throw new Error(`Error saving research file: ${(error as Error).message}`);
         }
     }
 
-    private sanitizeFileName(title: string): string {
-        return title.replace(/[\\/:*?"<>|]/g, '-');
+    private sanitizeFileName(fileName: string): string {
+        // Remove characters that are not allowed in file names
+        // This includes: \ / : * ? " < > | and #
+        return fileName
+            .replace(/[\\/:*?"<>|#]/g, '-')  // Replace illegal chars and # with dash
+            .replace(/\s+/g, ' ')           // Replace multiple spaces with single space
+            .replace(/^\s+|\s+$/g, '')      // Trim spaces from start and end
+            .replace(/^-+|-+$/g, '');       // Trim dashes from start and end
     }
 
     private updateProgress(progress: ProgressUpdate) {
@@ -708,53 +823,41 @@ export class ResearchManager {
     }
 
     async getGaps(section: string): Promise<string[]> {
-        const maxRetries = 1;
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                const learnings = this.getLearningsForSection(section);
-                if (!learnings.length) {
-                    this.debug('No learnings found for section:', section);
-                    return [];
-                }
-
-                const prompt = RESEARCH_PROMPTS.GAP(section, learnings);
-                const response = await this.getChatCompletion(prompt);
-                
-                this.debug('Gaps response:', response);
-                
-                // Try to clean the response if it contains markdown
-                let cleanResponse = response;
-                if (response.includes('```')) {
-                    cleanResponse = response.replace(/```json\n|\n```/g, '');
-                }
-                
-                const gaps = JSON.parse(cleanResponse);
-                
-                // Validate response format
-                if (!Array.isArray(gaps) || gaps.some(g => typeof g !== 'string')) {
-                    if (attempt < maxRetries) {
-                        this.debug('Invalid gaps format, retrying...');
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        continue;
-                    }
-                    throw new Error('Invalid gaps format returned from LLM');
-                }
-                
-                return gaps;
-
-            } catch (error) {
-                if (attempt < maxRetries) {
-                    this.debug('Error finding gaps, retrying:', error);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    continue;
-                }
-                this.debug('Error finding gaps:', error);
-                throw new Error(`Failed to find knowledge gaps: ${(error as Error).message}`);
+        try {
+            const learnings = this.getLearningsForSection(section);
+            if (!learnings.length) {
+                this.debug('No learnings found for section:', section);
+                return [];
             }
+
+            const prompt = RESEARCH_PROMPTS.GAP(section, learnings);
+            let response = await this.getChatCompletion(prompt);
+            
+            this.debug('Gaps response:', response);
+            
+            // Extract thinking section if present
+            const thinkMatch = response.match(/<think>(.*?)<\/think>/s);
+            if (thinkMatch) {
+                this.debug('Gap Analysis Reasoning:', thinkMatch[1].trim());
+                // Get everything after </think>
+                const outputMatch = response.match(/<\/think>(.*?)$/s);
+                if (!outputMatch) return [];
+                response = outputMatch[1].trim();
+            }
+
+            // Split into lines and filter empty ones
+            const gaps = response
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
+
+            this.debug('Parsed gaps:', gaps);
+            return gaps;
+
+        } catch (error) {
+            this.debug('Error finding gaps:', error);
+            throw new Error(`Failed to find knowledge gaps: ${(error as Error).message}`);
         }
-        
-        return [];
     }
 
     async synthesizeSection(section: string): Promise<string> {
@@ -780,5 +883,80 @@ export class ResearchManager {
             this.debug('Error synthesizing section:', error);
             throw new Error(`Failed to synthesize section: ${(error as Error).message}`);
         }
+    }
+
+    private checkCancellation() {
+        if (this.isCanceled) {
+            this.isCanceled = false; // Reset for next research
+            throw new Error('Research cancelled by user');
+        }
+    }
+
+    async cancelResearch() {
+        this.isCanceled = true;
+        this.debug('Research cancelled by user');
+        
+        // Reset all state
+        this.sectionLearnings = [];
+        this.sectionContent = [];
+        this.currentTopic = '';
+        this.currentReasoning = '';
+    }
+
+    private async extractLearnings(section: string, url: string, text: string): Promise<string[]> {
+        try {
+            const provider = ProviderFactory.createLLMProvider(this.settings);
+            if (!provider) {
+                throw new Error('No LLM provider configured');
+            }
+
+            const prompt = RESEARCH_PROMPTS.LEARNING(section, url, text);
+            const response = await this.getChatCompletion(prompt);
+            
+            // Split response into individual learnings
+            const learnings = response
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
+            
+            this.debug('Extracted learnings:', {
+                section,
+                url,
+                learnings
+            });
+
+            return learnings;
+
+        } catch (error) {
+            this.debug('Error extracting learnings:', error);
+            throw new Error(`Failed to extract learnings: ${(error as Error).message}`);
+        }
+    }
+
+    private formatResearchContent(researchData: ResearchData): string {
+        let content = '';
+
+        // Add title as H1
+        content += `${researchData.title}\n\n`;
+
+        // Add introduction
+        content += `## Introduction\n\n`;
+        content += `${researchData.introduction}\n\n`;
+
+        // Add each section's content
+        for (const section of researchData.sections) {
+            const sectionContent = this.getSectionContent(section);
+            content += `${sectionContent}\n\n`;
+        }
+
+        // Add conclusion
+        try {
+            const conclusionData = JSON.parse(researchData.conclusion);
+            content += Array.isArray(conclusionData) ? conclusionData[0] : conclusionData;
+        } catch {
+            content += researchData.conclusion;
+        }
+
+        return content;
     }
 } 

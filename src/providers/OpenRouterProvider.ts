@@ -42,57 +42,76 @@ export class OpenRouterProvider implements LLMProvider {
         maxTokens?: number;
         temperature?: number;
     }): Promise<string> {
-        // Always rate limit cloud providers
-        await this.rateLimiter.waitForNext();
+        const maxRetries = 1;
+        let retryCount = 0;
 
-        try {
-            // Check API key first
-            if (!this.apiKey) {
-                throw new Error('OpenRouter API key not configured. Please add your API key in settings.');
+        while (retryCount <= maxRetries) {
+            try {
+                // Always rate limit cloud providers
+                await this.rateLimiter.waitForNext();
+
+                // Check API key first
+                if (!this.apiKey) {
+                    throw new Error('OpenRouter API key not configured. Please add your API key in settings.');
+                }
+
+                const response = await requestUrl({
+                    url: `${this.baseUrl}/chat/completions`,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.apiKey}`,
+                        'HTTP-Referer': 'https://github.com/your-username/obsidian-deepest',
+                        'X-Title': 'Obsidian Deepest'
+                    },
+                    body: JSON.stringify({
+                        model: this.settings.selectedModel,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: prompt }
+                        ],
+                        max_tokens: options?.maxTokens || this.settings.maxTokens,
+                        temperature: options?.temperature || this.settings.temperature,
+                        stream: false
+                    })
+                });
+
+                if (response.status === 401) {
+                    throw new Error('Invalid or expired OpenRouter API key. Please check your API key in settings.');
+                }
+
+                if (response.status === 402) {
+                    throw new Error('OpenRouter API credit limit reached. Please check your account balance at openrouter.ai.');
+                }
+
+                if (response.status !== 200) {
+                    throw new Error(`OpenRouter request failed (${response.status}): ${response.text}`);
+                }
+
+                return response.json.choices[0].message.content;
+
+            } catch (error) {
+                const message = (error as Error).message;
+                
+                // If it's an HTTP2 protocol error and we haven't exceeded retries, try again
+                if (message.includes('ERR_HTTP2_PROTOCOL_ERROR') && retryCount < maxRetries) {
+                    retryCount++;
+                    // Wait a bit before retrying
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+
+                // Otherwise throw the error
+                if (message.includes('API key') || message.includes('credit limit')) {
+                    // Re-throw authentication and billing errors as-is
+                    throw error;
+                }
+                // Wrap other errors
+                throw new Error(`OpenRouter request failed: ${message}`);
             }
-
-            const response = await requestUrl({
-                url: `${this.baseUrl}/chat/completions`,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.apiKey}`,
-                    'HTTP-Referer': 'https://github.com/your-username/obsidian-deepest',
-                    'X-Title': 'Obsidian Deepest'
-                },
-                body: JSON.stringify({
-                    model: this.settings.selectedModel,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: prompt }
-                    ],
-                    max_tokens: options?.maxTokens || this.settings.maxTokens,
-                    temperature: options?.temperature || this.settings.temperature
-                })
-            });
-
-            if (response.status === 401) {
-                throw new Error('Invalid or expired OpenRouter API key. Please check your API key in settings.');
-            }
-
-            if (response.status === 402) {
-                throw new Error('OpenRouter API credit limit reached. Please check your account balance at openrouter.ai.');
-            }
-
-            if (response.status !== 200) {
-                throw new Error(`OpenRouter request failed (${response.status}): ${response.text}`);
-            }
-
-            return response.json.choices[0].message.content;
-        } catch (error) {
-            const message = (error as Error).message;
-            if (message.includes('API key') || message.includes('credit limit')) {
-                // Re-throw authentication and billing errors as-is
-                throw error;
-            }
-            // Wrap other errors
-            throw new Error(`OpenRouter request failed: ${message}`);
         }
+
+        throw new Error('Max retries exceeded for OpenRouter request');
     }
 
     async testConnection(): Promise<boolean> {
